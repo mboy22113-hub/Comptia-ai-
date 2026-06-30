@@ -1,0 +1,6 @@
+{
+  "name": "Security+ AI Learning Hub",
+  "description": "A ChatGPT-style learning companion for CompTIA Security+, featuring an AI Tutor, custom syllabus tracking, adaptive quizzes, flashcards, and progress analytics.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
