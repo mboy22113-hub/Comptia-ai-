@@ -180,7 +180,7 @@ export default function App() {
     setActiveSessionId(newId);
 
     if (initialText) {
-      handleSendMessage(newId, initialText);
+      handleSendMessage(newId, initialText, updated);
     }
   };
 
@@ -192,11 +192,12 @@ export default function App() {
     }
   };
 
-  const handleSendMessage = async (sessionId: string, text: string) => {
-    const sessionIndex = chatSessions.findIndex((s) => s.id === sessionId);
+  const handleSendMessage = async (sessionId: string, text: string, sessionsOverride?: ChatSession[]) => {
+    const sessionsList = sessionsOverride || chatSessions;
+    const sessionIndex = sessionsList.findIndex((s) => s.id === sessionId);
     if (sessionIndex === -1) return;
 
-    const session = chatSessions[sessionIndex];
+    const session = sessionsList[sessionIndex];
     const userMsg: ChatMessage = {
       id: `msg-${Date.now()}`,
       role: "user",
@@ -212,7 +213,7 @@ export default function App() {
       updatedTitle = text.length > 32 ? text.slice(0, 32) + "..." : text;
     }
 
-    const updatedSessions = [...chatSessions];
+    const updatedSessions = [...sessionsList];
     updatedSessions[sessionIndex] = {
       ...session,
       title: updatedTitle,
@@ -250,15 +251,18 @@ export default function App() {
         timestamp: new Date().toLocaleTimeString()
       };
 
-      const finalSessions = [...chatSessions];
-      const sIdx = finalSessions.findIndex((s) => s.id === sessionId);
-      if (sIdx !== -1) {
-        finalSessions[sIdx] = {
-          ...finalSessions[sIdx],
-          messages: [...finalSessions[sIdx].messages, modelMsg]
-        };
-        saveChatSessions(finalSessions);
-      }
+      setChatSessions((prevSessions) => {
+        const finalSessions = [...prevSessions];
+        const sIdx = finalSessions.findIndex((s) => s.id === sessionId);
+        if (sIdx !== -1) {
+          finalSessions[sIdx] = {
+            ...finalSessions[sIdx],
+            messages: [...finalSessions[sIdx].messages, modelMsg]
+          };
+          localStorage.setItem(STORAGE_KEY_CHATS, JSON.stringify(finalSessions));
+        }
+        return finalSessions;
+      });
     } catch (err: any) {
       console.error(err);
       const errMsg: ChatMessage = {
@@ -267,15 +271,18 @@ export default function App() {
         content: `⚠️ **Tutor Error:** ${err.message || "An error occurred. Check if the backend is configured with your Gemini key."}`,
         timestamp: new Date().toLocaleTimeString()
       };
-      const finalSessions = [...chatSessions];
-      const sIdx = finalSessions.findIndex((s) => s.id === sessionId);
-      if (sIdx !== -1) {
-        finalSessions[sIdx] = {
-          ...finalSessions[sIdx],
-          messages: [...finalSessions[sIdx].messages, errMsg]
-        };
-        saveChatSessions(finalSessions);
-      }
+      setChatSessions((prevSessions) => {
+        const finalSessions = [...prevSessions];
+        const sIdx = finalSessions.findIndex((s) => s.id === sessionId);
+        if (sIdx !== -1) {
+          finalSessions[sIdx] = {
+            ...finalSessions[sIdx],
+            messages: [...finalSessions[sIdx].messages, errMsg]
+          };
+          localStorage.setItem(STORAGE_KEY_CHATS, JSON.stringify(finalSessions));
+        }
+        return finalSessions;
+      });
     } finally {
       setIsAiLoading(false);
     }

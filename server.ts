@@ -526,9 +526,17 @@ async function startServer() {
     });
   }
 
-  app.listen(PORT, "0.0.0.0", () => {
-    console.log(`Server running on port ${PORT}`);
-  });
+  // Only listen if not running in a serverless environment like Vercel
+  if (!process.env.VERCEL) {
+    app.listen(PORT, "0.0.0.0", () => {
+      console.log(`Server running on port ${PORT}`);
+    });
+  }
 }
 
-startServer();
+// Start the server if running directly (not via serverless imports)
+if (!process.env.VERCEL) {
+  startServer();
+}
+
+export default app;
