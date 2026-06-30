@@ -14,28 +14,197 @@ app.use(express.json());
 // Lazy-initialize Gemini client to avoid crashes if API key is not yet set
 let aiClient: GoogleGenAI | null = null;
 
-function getGeminiClient(): GoogleGenAI {
-  if (!aiClient) {
-    const apiKey = process.env.GEMINI_API_KEY;
-    if (!apiKey) {
-      throw new Error("GEMINI_API_KEY environment variable is not set. Please set it in the Secrets panel in AI Studio.");
-    }
-    aiClient = new GoogleGenAI({
-      apiKey: apiKey,
-      httpOptions: {
-        headers: {
-          'User-Agent': 'aistudio-build',
-        }
-      }
-    });
+interface GeminiRequestOptions {
+  contents: any;
+  systemInstruction?: string;
+  responseMimeType?: string;
+  responseSchema?: any;
+}
+
+async function runWithTimeout<T>(promise: Promise<T>, timeoutMs: number, errorMsg: string): Promise<T> {
+  let timeoutId: NodeJS.Timeout;
+  const timeoutPromise = new Promise<never>((_, reject) => {
+    timeoutId = setTimeout(() => {
+      reject(new Error(errorMsg));
+    }, timeoutMs);
+  });
+  try {
+    const result = await Promise.race([promise, timeoutPromise]);
+    clearTimeout(timeoutId!);
+    return result;
+  } catch (error) {
+    clearTimeout(timeoutId!);
+    throw error;
   }
-  return aiClient;
+}
+
+async function generateWithRetryAndTimeout(
+  client: GoogleGenAI,
+  model: string,
+  contents: any,
+  reqConfig: any
+): Promise<any> {
+  const maxRetries = 2;
+  let delay = 500;
+
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    try {
+      // 20-second timeout per attempt to allow rich pedagogical structures to complete
+      const response = await runWithTimeout(
+        client.models.generateContent({
+          model: model,
+          contents: contents,
+          config: reqConfig
+        }),
+        20000,
+        `Timeout trying model ${model}`
+      );
+      return response;
+    } catch (error: any) {
+      const errMsg = (error.message || "").toLowerCase();
+      const is503 = errMsg.includes("503") || errMsg.includes("service unavailable") || errMsg.includes("experiencing high demand") || errMsg.includes("temporarily unavailable") || error.status === 503;
+      const isTimeout = errMsg.includes("timeout") || errMsg.includes("deadline") || errMsg.includes("etimedout");
+
+      if ((is503 || isTimeout) && attempt < maxRetries) {
+        console.warn(`[Gemini Retry] Model ${model} attempt ${attempt} failed with ${isTimeout ? 'timeout' : '503 (high demand)'}. Retrying in ${delay}ms...`);
+        await new Promise((resolve) => setTimeout(resolve, delay));
+        delay *= 2;
+        continue;
+      }
+      throw error;
+    }
+  }
+}
+
+async function generateContentWithLogs(options: GeminiRequestOptions): Promise<{ text: string; modelUsed: string }> {
+  const apiKey = process.env.GEMINI_API_KEY;
+  if (!apiKey) {
+    console.error("[Gemini Error] API key missing");
+    throw new Error("❌ Gemini API key not configured.");
+  }
+
+  // Log API key loaded (without revealing the key)
+  const maskedKey = apiKey.length > 8 ? `${apiKey.slice(0, 4)}...${apiKey.slice(-4)}` : "(too short)";
+  console.log(`[Gemini Request] API key loaded: true (Masked: ${maskedKey}, Length: ${apiKey.length})`);
+
+  // Models to try in fallback order (avoiding deprecated or paid-only models in basic requests)
+  const modelsToTry = [
+    "gemini-3.5-flash",
+    "gemini-flash-latest",
+    "gemini-3.1-flash-lite",
+    "gemini-2.5-flash"
+  ];
+  let lastError: any = null;
+
+  for (const model of modelsToTry) {
+    console.log(`[Gemini Request] Attempting model: ${model}`);
+    const startTime = Date.now();
+
+    try {
+      const client = new GoogleGenAI({
+        apiKey: apiKey,
+        httpOptions: {
+          headers: {
+            'User-Agent': 'aistudio-build',
+          }
+        }
+      });
+
+      const reqConfig: any = {};
+      if (options.systemInstruction) {
+        reqConfig.systemInstruction = options.systemInstruction;
+      }
+      if (options.responseMimeType) {
+        reqConfig.responseMimeType = options.responseMimeType;
+      }
+      if (options.responseSchema) {
+        reqConfig.responseSchema = options.responseSchema;
+      }
+
+      const response = await generateWithRetryAndTimeout(client, model, options.contents, reqConfig);
+
+      const endTime = Date.now();
+      const duration = endTime - startTime;
+      console.log(`[Gemini Success] Model used: ${model} | Request time: ${new Date(startTime).toISOString()} | Response time: ${duration}ms`);
+
+      return {
+        text: response.text || "",
+        modelUsed: model
+      };
+    } catch (error: any) {
+      const endTime = Date.now();
+      const duration = endTime - startTime;
+      console.error(`[Gemini Error] Model ${model} failed after ${duration}ms`);
+      console.error(`[Gemini Error Message] ${error.message || error}`);
+      if (error.stack) {
+        console.error(`[Gemini Error Stack] ${error.stack}`);
+      }
+
+      lastError = error;
+
+      // Stop trying other models ONLY if the API key itself is invalid.
+      // Quota limits are often per-model, so we should continue trying other models.
+      const errMsg = (error.message || "").toLowerCase();
+      const isInvalidKey = errMsg.includes("api_key_invalid") || errMsg.includes("invalid key") || errMsg.includes("api key invalid") || errMsg.includes("key is invalid") || error.status === 400 && errMsg.includes("key");
+
+      if (isInvalidKey) {
+        break;
+      }
+    }
+  }
+
+  // All models failed, or broke early
+  const finalErrorMsg = lastError ? (lastError.message || String(lastError)) : "Unknown error";
+  const lowerErr = finalErrorMsg.toLowerCase();
+
+  let friendlyError = `❌ Gemini API Error: ${finalErrorMsg}`;
+  if (lowerErr.includes("api_key_invalid") || lowerErr.includes("api key invalid") || lowerErr.includes("invalid key") || lowerErr.includes("key is invalid")) {
+    friendlyError = "❌ Invalid Gemini API key";
+  } else if (lowerErr.includes("quota") || lowerErr.includes("limit") || lowerErr.includes("exhausted") || lastError?.status === 429) {
+    friendlyError = "❌ Quota exceeded";
+  } else if (lowerErr.includes("model not found") || lowerErr.includes("unsupported") || lowerErr.includes("model_not_found")) {
+    friendlyError = "❌ Unsupported model";
+  } else if (lowerErr.includes("timeout") || lowerErr.includes("etimedout") || lowerErr.includes("deadline")) {
+    friendlyError = "❌ Network timeout";
+  }
+
+  throw new Error(friendlyError);
 }
 
 // Ensure the server can handle requests and verify status
-app.get("/api/health", (req, res) => {
-  const hasKey = !!process.env.GEMINI_API_KEY;
-  res.json({ status: "ok", geminiKeyConfigured: hasKey });
+app.get("/api/health", async (req, res) => {
+  try {
+    const response = await generateContentWithLogs({
+      contents: "ping"
+    });
+    res.json({
+      status: "ok",
+      gemini: "connected",
+      model: response.modelUsed
+    });
+  } catch (error: any) {
+    console.error("Health check Gemini verification failed:", error);
+    res.status(500).json({
+      status: "error",
+      gemini: "failed",
+      reason: error.message || String(error)
+    });
+  }
+});
+
+// TEST GEMINI ENDPOINT
+app.post("/api/test-gemini", async (req, res) => {
+  try {
+    const response = await generateContentWithLogs({
+      contents: "Say Hello."
+    });
+    res.json({
+      text: response.text || "Hello! How can I help you today?"
+    });
+  } catch (error: any) {
+    console.error("Test Gemini endpoint failed:", error);
+    res.status(500).json({ error: error.message || String(error) });
+  }
 });
 
 // AI TUTOR ROUTE
@@ -47,8 +216,6 @@ app.post("/api/tutor", async (req, res) => {
       return;
     }
 
-    const ai = getGeminiClient();
-
     // Map frontend messages format to Google Gen AI format
     // Role mapping: "user" -> "user", "model" -> "model"
     const formattedContents = messages.map((m: any) => ({
@@ -56,16 +223,13 @@ app.post("/api/tutor", async (req, res) => {
       parts: [{ text: m.content }]
     }));
 
-    const response = await ai.models.generateContent({
-      model: "gemini-3.5-flash",
+    const response = await generateContentWithLogs({
       contents: formattedContents,
-      config: {
-        systemInstruction: `You are an expert CompTIA Security+ Cybersecurity Instructor and AI Tutor.
+      systemInstruction: `You are an expert CompTIA Security+ Cybersecurity Instructor and AI Tutor.
 Your goal is to explain complex cybersecurity concepts in simple, easy-to-understand language with real-world examples.
 CRITICAL CONSTRAINT: You must ONLY answer questions directly related to CompTIA Security+, cybersecurity, networking, Linux, cloud security, Python for security, cryptography, identity & access management, risk management, and security operations.
 If a user asks about anything outside of these fields (e.g., cooking, general pop culture, general history, general trivia), you must politely but firmly decline to answer, explaining that your expertise is strictly dedicated to the CompTIA Security+ syllabus and cybersecurity.
 Format your responses using clean Markdown, including headers, lists, code blocks with proper syntax highlighting, and clean ASCII/HTML tables when presenting comparisons or models.`
-      }
     });
 
     res.json({ text: response.text });
@@ -84,7 +248,6 @@ app.post("/api/quiz", async (req, res) => {
       return;
     }
 
-    const ai = getGeminiClient();
     const prompt = `Generate a standard Cybersecurity practice quiz for the CompTIA Security+ topic: "${topicTitle}".
 Topic Description: ${topicDescription || ""}
 Count of questions: ${count || 10}
@@ -97,35 +260,32 @@ Rules:
 4. Provide a detailed, pedagogical explanation for the correct answer and explain why the other options are wrong.
 5. Level of technical depth should match the ${difficulty || "medium"} level specified.`;
 
-    const response = await ai.models.generateContent({
-      model: "gemini-3.5-flash",
+    const response = await generateContentWithLogs({
       contents: prompt,
-      config: {
-        responseMimeType: "application/json",
-        responseSchema: {
-          type: Type.OBJECT,
-          properties: {
-            questions: {
-              type: Type.ARRAY,
-              description: "Array of practice questions.",
-              items: {
-                type: Type.OBJECT,
-                properties: {
-                  question: { type: Type.STRING, description: "The practice question itself, often based on a real-world cybersecurity scenario." },
-                  options: {
-                    type: Type.ARRAY,
-                    items: { type: Type.STRING },
-                    description: "An array of exactly 4 plausible multiple-choice options."
-                  },
-                  correctIndex: { type: Type.INTEGER, description: "The zero-based index of the correct answer in the options array (0 to 3)." },
-                  explanation: { type: Type.STRING, description: "A detailed pedagogical explanation of the correct choice and why the others are incorrect." }
+      responseMimeType: "application/json",
+      responseSchema: {
+        type: Type.OBJECT,
+        properties: {
+          questions: {
+            type: Type.ARRAY,
+            description: "Array of practice questions.",
+            items: {
+              type: Type.OBJECT,
+              properties: {
+                question: { type: Type.STRING, description: "The practice question itself, often based on a real-world cybersecurity scenario." },
+                options: {
+                  type: Type.ARRAY,
+                  items: { type: Type.STRING },
+                  description: "An array of exactly 4 plausible multiple-choice options."
                 },
-                required: ["question", "options", "correctIndex", "explanation"]
-              }
+                correctIndex: { type: Type.INTEGER, description: "The zero-based index of the correct answer in the options array (0 to 3)." },
+                explanation: { type: Type.STRING, description: "A detailed pedagogical explanation of the correct choice and why the others are incorrect." }
+              },
+              required: ["question", "options", "correctIndex", "explanation"]
             }
-          },
-          required: ["questions"]
-        }
+          }
+        },
+        required: ["questions"]
       }
     });
 
@@ -147,7 +307,6 @@ app.post("/api/flashcards", async (req, res) => {
       return;
     }
 
-    const ai = getGeminiClient();
     const prompt = `Generate 6-8 comprehensive flashcards to help study the CompTIA Security+ topic: "${topicTitle}".
 Topic Context: ${topicDescription || ""}
 
@@ -156,29 +315,26 @@ Rules:
 - Keep the front side short (a term, concept, or quick question).
 - Keep the back side high-impact, accurate, and educational (a clear definition, summary, or key takeaways).`;
 
-    const response = await ai.models.generateContent({
-      model: "gemini-3.5-flash",
+    const response = await generateContentWithLogs({
       contents: prompt,
-      config: {
-        responseMimeType: "application/json",
-        responseSchema: {
-          type: Type.OBJECT,
-          properties: {
-            flashcards: {
-              type: Type.ARRAY,
-              description: "List of educational flashcards.",
-              items: {
-                type: Type.OBJECT,
-                properties: {
-                  front: { type: Type.STRING, description: "Front side of the flashcard (e.g., 'Symmetric Hashing', 'CVSS Score')." },
-                  back: { type: Type.STRING, description: "Back side of the flashcard containing the precise definition or key answer." }
-                },
-                required: ["front", "back"]
-              }
+      responseMimeType: "application/json",
+      responseSchema: {
+        type: Type.OBJECT,
+        properties: {
+          flashcards: {
+            type: Type.ARRAY,
+            description: "List of educational flashcards.",
+            items: {
+              type: Type.OBJECT,
+              properties: {
+                front: { type: Type.STRING, description: "Front side of the flashcard (e.g., 'Symmetric Hashing', 'CVSS Score')." },
+                back: { type: Type.STRING, description: "Back side of the flashcard containing the precise definition or key answer." }
+              },
+              required: ["front", "back"]
             }
-          },
-          required: ["flashcards"]
-        }
+          }
+        },
+        required: ["flashcards"]
       }
     });
 
@@ -199,7 +355,6 @@ app.post("/api/messer/summary", async (req, res) => {
       return;
     }
 
-    const ai = getGeminiClient();
     const prompt = `You are an elite CompTIA Security+ SY0-701 Cybersecurity Professor.
 Create a comprehensive, premium, highly educational study summary for the video lesson: "${videoTitle}".
 Related Exam Objective: ${syllabusTopicId ? `${syllabusTopicId}: ${syllabusTopicTitle || ""}` : "General Security+"}
@@ -225,12 +380,9 @@ Highlight 2 or 3 frequent misunderstandings, confusion points, or common exam tr
 # Real-World Cybersecurity Examples
 Give a realistic, practical scenario or real-world example showing how these concepts are applied in enterprise cybersecurity environments (e.g., threat hunting, defense-in-depth, security operations).`;
 
-    const response = await ai.models.generateContent({
-      model: "gemini-3.5-flash",
+    const response = await generateContentWithLogs({
       contents: prompt,
-      config: {
-        systemInstruction: "You are an expert CompTIA Security+ SY0-701 Cybersecurity Instructor. Format your output using clean Markdown headings, bullet points, and code blocks as appropriate."
-      }
+      systemInstruction: "You are an expert CompTIA Security+ SY0-701 Cybersecurity Instructor. Format your output using clean Markdown headings, bullet points, and code blocks as appropriate."
     });
 
     res.json({ summary: response.text || "No summary was generated." });
@@ -249,7 +401,6 @@ app.post("/api/messer/quiz", async (req, res) => {
       return;
     }
 
-    const ai = getGeminiClient();
     const prompt = `Generate a standard Cybersecurity practice quiz for the Professor Messer Security+ video: "${videoTitle}".
 Exam Objective: ${syllabusTopicId ? `${syllabusTopicId}: ${syllabusTopicTitle || ""}` : "CompTIA Security+ SY0-701"}
 
@@ -266,39 +417,36 @@ Rules:
 4. Set difficulty appropriately ('easy', 'medium', or 'hard') for each question.
 5. Provide the exact associated exam objective for each question.`;
 
-    const response = await ai.models.generateContent({
-      model: "gemini-3.5-flash",
+    const response = await generateContentWithLogs({
       contents: prompt,
-      config: {
-        responseMimeType: "application/json",
-        responseSchema: {
-          type: Type.OBJECT,
-          properties: {
-            questions: {
-              type: Type.ARRAY,
-              description: "Array of exactly 23 practice questions: 10 MCQs, 5 True/False, 5 Scenario-based, and 3 Fill-in-the-blank questions.",
-              items: {
-                type: Type.OBJECT,
-                properties: {
-                  type: { type: Type.STRING, description: "Must be 'mcq', 'tf', 'scenario', or 'fitb'." },
-                  question: { type: Type.STRING, description: "The quiz question. For fill-in-the-blank, use '___' for the blank space." },
-                  options: {
-                    type: Type.ARRAY,
-                    items: { type: Type.STRING },
-                    description: "An array of options. For mcq and scenario: exactly 4 options. For tf: exactly ['True', 'False']. For fitb: exactly 4 single-word/phrase options."
-                  },
-                  correctIndex: { type: Type.INTEGER, description: "Zero-based index of the correct option in options array." },
-                  correctAnswer: { type: Type.STRING, description: "The exact text of the correct answer." },
-                  explanation: { type: Type.STRING, description: "A detailed explanation of why this is correct and why other choices are wrong." },
-                  difficulty: { type: Type.STRING, description: "Should be 'easy', 'medium', or 'hard'." },
-                  objective: { type: Type.STRING, description: "The related CompTIA exam objective (e.g., 'Objective 1.1' or 'Objective 1.4')." }
+      responseMimeType: "application/json",
+      responseSchema: {
+        type: Type.OBJECT,
+        properties: {
+          questions: {
+            type: Type.ARRAY,
+            description: "Array of exactly 23 practice questions: 10 MCQs, 5 True/False, 5 Scenario-based, and 3 Fill-in-the-blank questions.",
+            items: {
+              type: Type.OBJECT,
+              properties: {
+                type: { type: Type.STRING, description: "Must be 'mcq', 'tf', 'scenario', or 'fitb'." },
+                question: { type: Type.STRING, description: "The quiz question. For fill-in-the-blank, use '___' for the blank space." },
+                options: {
+                  type: Type.ARRAY,
+                  items: { type: Type.STRING },
+                  description: "An array of options. For mcq and scenario: exactly 4 options. For tf: exactly ['True', 'False']. For fitb: exactly 4 single-word/phrase options."
                 },
-                required: ["type", "question", "options", "correctIndex", "correctAnswer", "explanation", "difficulty", "objective"]
-              }
+                correctIndex: { type: Type.INTEGER, description: "Zero-based index of the correct option in options array." },
+                correctAnswer: { type: Type.STRING, description: "The exact text of the correct answer." },
+                explanation: { type: Type.STRING, description: "A detailed explanation of why this is correct and why other choices are wrong." },
+                difficulty: { type: Type.STRING, description: "Should be 'easy', 'medium', or 'hard'." },
+                objective: { type: Type.STRING, description: "The related CompTIA exam objective (e.g., 'Objective 1.1' or 'Objective 1.4')." }
+              },
+              required: ["type", "question", "options", "correctIndex", "correctAnswer", "explanation", "difficulty", "objective"]
             }
-          },
-          required: ["questions"]
-        }
+          }
+        },
+        required: ["questions"]
       }
     });
 
@@ -319,7 +467,6 @@ app.post("/api/messer/flashcards", async (req, res) => {
       return;
     }
 
-    const ai = getGeminiClient();
     const prompt = `Generate exactly 6 to 8 flashcards to help study concepts covered in Professor Messer's lesson: "${videoTitle}".
 Exam Objective: ${syllabusTopicId ? `${syllabusTopicId}: ${syllabusTopicTitle || ""}` : "CompTIA Security+ SY0-701"}
 
@@ -327,34 +474,31 @@ Rules:
 - Create original flashcards focusing on critical terms, ports, definitions, or core protocols from this topic.
 - Keep the front side short and direct (e.g., a term, acronym, or quick question).
 - Keep the back side educational (a precise, clear answer or explanation).
-- Provide a real-world example demonstrating the term in use.
+- Provide a realistic cybersecurity example demonstrating this concept.
 - Provide a helpful mnemonic device or memory tip to help the student remember it.`;
 
-    const response = await ai.models.generateContent({
-      model: "gemini-3.5-flash",
+    const response = await generateContentWithLogs({
       contents: prompt,
-      config: {
-        responseMimeType: "application/json",
-        responseSchema: {
-          type: Type.OBJECT,
-          properties: {
-            flashcards: {
-              type: Type.ARRAY,
-              description: "Array of exactly 6 to 8 flashcards covering key terms and concepts.",
-              items: {
-                type: Type.OBJECT,
-                properties: {
-                  front: { type: Type.STRING, description: "Front side of the flashcard." },
-                  back: { type: Type.STRING, description: "Back side of the flashcard." },
-                  realWorldExample: { type: Type.STRING, description: "A realistic cybersecurity example demonstrating this concept." },
-                  memoryTip: { type: Type.STRING, description: "A clever mnemonic or memory tip to remember this." }
-                },
-                required: ["front", "back", "realWorldExample", "memoryTip"]
-              }
+      responseMimeType: "application/json",
+      responseSchema: {
+        type: Type.OBJECT,
+        properties: {
+          flashcards: {
+            type: Type.ARRAY,
+            description: "Array of exactly 6 to 8 flashcards covering key terms and concepts.",
+            items: {
+              type: Type.OBJECT,
+              properties: {
+                front: { type: Type.STRING, description: "Front side of the flashcard." },
+                back: { type: Type.STRING, description: "Back side of the flashcard." },
+                realWorldExample: { type: Type.STRING, description: "A realistic cybersecurity example demonstrating this concept." },
+                memoryTip: { type: Type.STRING, description: "A clever mnemonic or memory tip to remember this." }
+              },
+              required: ["front", "back", "realWorldExample", "memoryTip"]
             }
-          },
-          required: ["flashcards"]
-        }
+          }
+        },
+        required: ["flashcards"]
       }
     });
 

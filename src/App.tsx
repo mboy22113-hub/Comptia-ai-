@@ -13,8 +13,7 @@ import {
   RefreshCw,
   CheckCircle,
   CheckCircle2,
-  Award,
-  Youtube
+  Award
 } from "lucide-react";
 import { StudyStats, ChatSession, ChatMessage, Flashcard, QuizHistoryItem } from "./types";
 import { ALL_SYLLABUS_TOPICS } from "./data/syllabus";
@@ -26,7 +25,6 @@ import { AITutorView } from "./components/AITutorView";
 import { AIQuizView } from "./components/AIQuizView";
 import { FlashcardsView } from "./components/FlashcardsView";
 import { ProgressAnalyticsView } from "./components/ProgressAnalyticsView";
-import { ProfessorMesserView } from "./components/ProfessorMesserView";
 
 const STORAGE_KEY_STATS = "security_plus_study_stats_v1";
 const STORAGE_KEY_CHATS = "security_plus_chats_v1";
@@ -232,7 +230,16 @@ export default function App() {
       });
 
       if (!response.ok) {
-        throw new Error("Tutor backend error. Check your Gemini API configuration.");
+        let errorMsg = "Tutor backend error. Check your Gemini API configuration.";
+        try {
+          const errData = await response.json();
+          if (errData && errData.error) {
+            errorMsg = errData.error;
+          }
+        } catch (e) {
+          // ignore parsing error
+        }
+        throw new Error(errorMsg);
       }
 
       const data = await response.json();
@@ -300,7 +307,16 @@ export default function App() {
       });
 
       if (!response.ok) {
-        throw new Error("Continuation failed.");
+        let errorMsg = "Continuation failed.";
+        try {
+          const errData = await response.json();
+          if (errData && errData.error) {
+            errorMsg = errData.error;
+          }
+        } catch (e) {
+          // ignore
+        }
+        throw new Error(errorMsg);
       }
 
       const data = await response.json();
@@ -388,7 +404,6 @@ export default function App() {
   // Navigation Items
   const menuItems = [
     { name: "Dashboard", icon: LayoutDashboard },
-    { name: "Professor Messer", icon: Youtube },
     { name: "Syllabus", icon: BookOpen },
     { name: "AI Tutor", icon: MessageSquare },
     { name: "AI Quiz", icon: HelpCircle },
@@ -516,26 +531,6 @@ export default function App() {
             onOpenSidebar={() => setSidebarOpen(true)}
             onClose={() => setActiveTab("Dashboard")}
           />
-        ) : activeTab === "Professor Messer" ? (
-          <div className="flex-1 flex flex-col overflow-hidden relative">
-            <button
-              onClick={() => setSidebarOpen(true)}
-              className="absolute top-4 left-4 z-10 p-1.5 rounded-lg border border-gray-200 text-slate-600 hover:text-slate-900 hover:bg-gray-100 md:hidden cursor-pointer bg-white"
-            >
-              <Menu size={18} />
-            </button>
-            <ProfessorMesserView
-              onTriggerStudyActivity={triggerStudyActivity}
-              onAddQuizHistory={handleAddQuizToHistory}
-              onAddFlashcards={(cards) => {
-                const currentCards = stats.flashcards || [];
-                const filteredCards = cards.filter((c: any) => !currentCards.some(cc => cc.id === c.id));
-                if (filteredCards.length > 0) {
-                  handleUpdateFlashcards([...currentCards, ...filteredCards]);
-                }
-              }}
-            />
-          </div>
         ) : (
           <>
             {/* Top Header navbar */}

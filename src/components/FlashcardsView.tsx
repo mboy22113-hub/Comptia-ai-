@@ -45,7 +45,16 @@ export function FlashcardsView({
       });
 
       if (!response.ok) {
-        throw new Error("Failed to generate flashcards. Please verify your Gemini API key is configured correctly.");
+        let errorMsg = "Failed to generate flashcards. Please verify your Gemini API key is configured correctly.";
+        try {
+          const errData = await response.json();
+          if (errData && errData.error) {
+            errorMsg = errData.error;
+          }
+        } catch (e) {
+          // ignore
+        }
+        throw new Error(errorMsg);
       }
 
       const data = await response.json();
