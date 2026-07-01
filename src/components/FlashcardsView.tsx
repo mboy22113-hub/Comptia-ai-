@@ -37,7 +37,10 @@ export function FlashcardsView({
     try {
       const response = await fetch("/api/flashcards", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { 
+          "Content-Type": "application/json",
+          "x-gemini-api-key": localStorage.getItem("security_plus_user_gemini_key") || ""
+        },
         body: JSON.stringify({
           topicTitle: `${activeTopic.id}: ${activeTopic.title}`,
           topicDescription: activeTopic.description

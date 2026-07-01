@@ -19,6 +19,22 @@ interface GeminiRequestOptions {
   systemInstruction?: string;
   responseMimeType?: string;
   responseSchema?: any;
+  apiKey?: string;
+}
+
+function getRequestApiKey(req: express.Request): string | undefined {
+  const customHeader = req.headers["x-gemini-api-key"];
+  if (customHeader && typeof customHeader === "string" && customHeader.trim()) {
+    return customHeader.trim();
+  }
+  
+  const authHeader = req.headers["authorization"];
+  if (authHeader && typeof authHeader === "string" && authHeader.startsWith("Bearer ")) {
+    const key = authHeader.substring(7).trim();
+    if (key) return key;
+  }
+  
+  return undefined;
 }
 
 async function runWithTimeout<T>(promise: Promise<T>, timeoutMs: number, errorMsg: string): Promise<T> {
@@ -77,10 +93,16 @@ async function generateWithRetryAndTimeout(
 }
 
 async function generateContentWithLogs(options: GeminiRequestOptions): Promise<{ text: string; modelUsed: string }> {
-  const apiKey = process.env.GEMINI_API_KEY;
+  let apiKey = options.apiKey || process.env.GEMINI_API_KEY;
   if (!apiKey) {
     console.error("[Gemini Error] API key missing");
-    throw new Error("❌ Gemini API key not configured.");
+    throw new Error("❌ Gemini API key not configured. Please supply an API key in the Settings or backend environment variables.");
+  }
+
+  // Clean the API key from common wrapper prefixes if the user copied/pasted it with wrapper info
+  apiKey = apiKey.trim();
+  if (apiKey.startsWith("Gemini_1,")) {
+    apiKey = apiKey.substring("Gemini_1,".length).trim();
   }
 
   // Log API key loaded (without revealing the key)
@@ -173,21 +195,36 @@ async function generateContentWithLogs(options: GeminiRequestOptions): Promise<{
 
 // Ensure the server can handle requests and verify status
 app.get("/api/health", async (req, res) => {
+  const apiKey = getRequestApiKey(req) || process.env.GEMINI_API_KEY;
+  if (!apiKey) {
+    res.json({
+      status: "ok",
+      gemini: "not_configured",
+      geminiKeyConfigured: false,
+      reason: "API key is missing"
+    });
+    return;
+  }
+
   try {
+    // Run a real test request with a fast model to verify the key is valid and has quota
     const response = await generateContentWithLogs({
-      contents: "ping"
+      contents: "ping",
+      apiKey
     });
     res.json({
       status: "ok",
       gemini: "connected",
+      geminiKeyConfigured: true,
       model: response.modelUsed
     });
   } catch (error: any) {
     console.error("Health check Gemini verification failed:", error);
-    res.status(500).json({
+    res.json({
       status: "error",
       gemini: "failed",
-      reason: error.message || String(error)
+      reason: error.message || String(error),
+      geminiKeyConfigured: false
     });
   }
 });
@@ -195,8 +232,10 @@ app.get("/api/health", async (req, res) => {
 // TEST GEMINI ENDPOINT
 app.post("/api/test-gemini", async (req, res) => {
   try {
+    const apiKey = getRequestApiKey(req);
     const response = await generateContentWithLogs({
-      contents: "Say Hello."
+      contents: "Say Hello.",
+      apiKey
     });
     res.json({
       text: response.text || "Hello! How can I help you today?"
@@ -223,8 +262,10 @@ app.post("/api/tutor", async (req, res) => {
       parts: [{ text: m.content }]
     }));
 
+    const apiKey = getRequestApiKey(req);
     const response = await generateContentWithLogs({
       contents: formattedContents,
+      apiKey,
       systemInstruction: `You are an expert CompTIA Security+ Cybersecurity Instructor and AI Tutor.
 Your goal is to explain complex cybersecurity concepts in simple, easy-to-understand language with real-world examples.
 CRITICAL CONSTRAINT: You must ONLY answer questions directly related to CompTIA Security+, cybersecurity, networking, Linux, cloud security, Python for security, cryptography, identity & access management, risk management, and security operations.
@@ -260,8 +301,10 @@ Rules:
 4. Provide a detailed, pedagogical explanation for the correct answer and explain why the other options are wrong.
 5. Level of technical depth should match the ${difficulty || "medium"} level specified.`;
 
+    const apiKey = getRequestApiKey(req);
     const response = await generateContentWithLogs({
       contents: prompt,
+      apiKey,
       responseMimeType: "application/json",
       responseSchema: {
         type: Type.OBJECT,
@@ -315,8 +358,10 @@ Rules:
 - Keep the front side short (a term, concept, or quick question).
 - Keep the back side high-impact, accurate, and educational (a clear definition, summary, or key takeaways).`;
 
+    const apiKey = getRequestApiKey(req);
     const response = await generateContentWithLogs({
       contents: prompt,
+      apiKey,
       responseMimeType: "application/json",
       responseSchema: {
         type: Type.OBJECT,
@@ -380,8 +425,10 @@ Highlight 2 or 3 frequent misunderstandings, confusion points, or common exam tr
 # Real-World Cybersecurity Examples
 Give a realistic, practical scenario or real-world example showing how these concepts are applied in enterprise cybersecurity environments (e.g., threat hunting, defense-in-depth, security operations).`;
 
+    const apiKey = getRequestApiKey(req);
     const response = await generateContentWithLogs({
       contents: prompt,
+      apiKey,
       systemInstruction: "You are an expert CompTIA Security+ SY0-701 Cybersecurity Instructor. Format your output using clean Markdown headings, bullet points, and code blocks as appropriate."
     });
 
@@ -417,8 +464,10 @@ Rules:
 4. Set difficulty appropriately ('easy', 'medium', or 'hard') for each question.
 5. Provide the exact associated exam objective for each question.`;
 
+    const apiKey = getRequestApiKey(req);
     const response = await generateContentWithLogs({
       contents: prompt,
+      apiKey,
       responseMimeType: "application/json",
       responseSchema: {
         type: Type.OBJECT,
@@ -477,8 +526,10 @@ Rules:
 - Provide a realistic cybersecurity example demonstrating this concept.
 - Provide a helpful mnemonic device or memory tip to help the student remember it.`;
 
+    const apiKey = getRequestApiKey(req);
     const response = await generateContentWithLogs({
       contents: prompt,
+      apiKey,
       responseMimeType: "application/json",
       responseSchema: {
         type: Type.OBJECT,

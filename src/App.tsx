@@ -52,6 +52,22 @@ export default function App() {
   const [isAiLoading, setIsAiLoading] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [apiHealth, setApiHealth] = useState<{ status: string; geminiKeyConfigured: boolean } | null>(null);
+  
+  const [userGeminiKey, setUserGeminiKey] = useState<string>(() => {
+    return localStorage.getItem("security_plus_user_gemini_key") || "";
+  });
+
+  const checkApiHealth = (customKey?: string) => {
+    const keyToUse = customKey !== undefined ? customKey : (localStorage.getItem("security_plus_user_gemini_key") || "");
+    fetch("/api/health", {
+      headers: {
+        "x-gemini-api-key": keyToUse
+      }
+    })
+      .then((r) => r.json())
+      .then((data) => setApiHealth(data))
+      .catch((err) => console.error("Error checking health:", err));
+  };
 
   // Load initial state
   useEffect(() => {
@@ -73,11 +89,8 @@ export default function App() {
       console.error("Error loading local storage state:", e);
     }
 
-    // Perform API Health Check
-    fetch("/api/health")
-      .then((r) => r.json())
-      .then((data) => setApiHealth(data))
-      .catch((err) => console.error("Error checking health:", err));
+    // Perform API Health Check with the key
+    checkApiHealth();
   }, []);
 
   // Save Stats
@@ -226,7 +239,10 @@ export default function App() {
     try {
       const response = await fetch("/api/tutor", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { 
+          "Content-Type": "application/json",
+          "x-gemini-api-key": localStorage.getItem("security_plus_user_gemini_key") || ""
+        },
         body: JSON.stringify({ messages: updatedMsgs })
       });
 
@@ -309,7 +325,10 @@ export default function App() {
     try {
       const response = await fetch("/api/tutor", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { 
+          "Content-Type": "application/json",
+          "x-gemini-api-key": localStorage.getItem("security_plus_user_gemini_key") || ""
+        },
         body: JSON.stringify({ messages: updatedMsgs })
       });
 
@@ -506,15 +525,74 @@ export default function App() {
           })}
         </nav>
 
-        {/* Footer info & API Key warning badge */}
-        <div className="mt-auto pt-4 border-t border-gray-200 px-2 space-y-2">
-          {apiHealth && !apiHealth.geminiKeyConfigured && (
-            <div className="p-2.5 rounded-lg bg-red-50 text-[10px] text-red-600 border border-red-200 flex flex-col gap-1">
-              <span className="font-bold">⚠️ Gemini Key Missing</span>
-              <span>Set GEMINI_API_KEY in the Secrets menu to unlock AI Tutor, Quiz & Flashcard generation.</span>
+        {/* Footer info & API Key Setup */}
+        <div className="mt-auto pt-4 border-t border-gray-200 px-2 space-y-3">
+          <div className="p-3 rounded-xl bg-slate-900 text-white shadow-md flex flex-col gap-2.5">
+            <div className="flex items-center justify-between">
+              <span className="text-xs font-bold tracking-wide flex items-center gap-1.5">
+                <Sparkles size={12} className="text-blue-400 animate-pulse" />
+                Gemini API Key
+              </span>
+              {apiHealth?.geminiKeyConfigured ? (
+                <span className="inline-flex items-center px-1.5 py-0.5 rounded-full text-[9px] font-bold bg-emerald-500/20 text-emerald-400">
+                  Active
+                </span>
+              ) : apiHealth && apiHealth.status === "error" ? (
+                <span className="inline-flex items-center px-1.5 py-0.5 rounded-full text-[9px] font-bold bg-rose-500/20 text-rose-400">
+                  Invalid
+                </span>
+              ) : (
+                <span className="inline-flex items-center px-1.5 py-0.5 rounded-full text-[9px] font-bold bg-slate-500/20 text-slate-400">
+                  Missing
+                </span>
+              )}
             </div>
-          )}
-          <div className="flex items-center justify-between text-[11px] text-gray-400 font-medium">
+
+            {apiHealth && apiHealth.status === "error" && apiHealth.reason && (
+              <div className="text-[10px] text-rose-300 bg-rose-500/10 p-2 rounded-lg border border-rose-500/20 leading-relaxed font-medium font-mono break-words">
+                ⚠️ {apiHealth.reason.replace("❌ ", "")}
+              </div>
+            )}
+
+            <div className="space-y-1.5">
+              <input
+                type="password"
+                placeholder="Paste Gemini API key..."
+                value={userGeminiKey}
+                onChange={(e) => setUserGeminiKey(e.target.value)}
+                className="w-full px-2.5 py-1.5 text-xs bg-slate-800 border border-slate-700 rounded-lg text-slate-100 placeholder-slate-500 focus:outline-hidden focus:border-blue-500 transition-colors font-mono"
+              />
+              <div className="flex gap-1.5">
+                <button
+                  onClick={() => {
+                    localStorage.setItem("security_plus_user_gemini_key", userGeminiKey);
+                    checkApiHealth(userGeminiKey);
+                  }}
+                  className="flex-1 py-1 px-2 rounded-md bg-blue-600 hover:bg-blue-500 active:bg-blue-700 text-[10px] font-bold tracking-wider uppercase transition-all text-center cursor-pointer text-white"
+                >
+                  Save & Test
+                </button>
+                {userGeminiKey && (
+                  <button
+                    onClick={() => {
+                      setUserGeminiKey("");
+                      localStorage.removeItem("security_plus_user_gemini_key");
+                      checkApiHealth("");
+                    }}
+                    className="py-1 px-2 rounded-md bg-slate-800 hover:bg-slate-700 text-slate-400 hover:text-white text-[10px] font-bold transition-all cursor-pointer border border-slate-700"
+                  >
+                    Clear
+                  </button>
+                )}
+              </div>
+            </div>
+
+            <p className="text-[9px] text-slate-400 leading-normal font-medium">
+              You can get a free API key from Google AI Studio. The key is saved safely in your browser's local storage.
+            </p>
+          </div>
+
+          <div className="flex items-center justify-between text-[11px] text-gray-400 font-medium px-1">
             <span>SY0-701 Companion</span>
             <span>v1.2.0</span>
           </div>
