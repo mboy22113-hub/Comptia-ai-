@@ -51,23 +51,6 @@ export default function App() {
   // AI loading and mobile UI states
   const [isAiLoading, setIsAiLoading] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(false);
-  const [apiHealth, setApiHealth] = useState<{ status: string; geminiKeyConfigured: boolean } | null>(null);
-  
-  const [userGeminiKey, setUserGeminiKey] = useState<string>(() => {
-    return localStorage.getItem("security_plus_user_gemini_key") || "";
-  });
-
-  const checkApiHealth = (customKey?: string) => {
-    const keyToUse = customKey !== undefined ? customKey : (localStorage.getItem("security_plus_user_gemini_key") || "");
-    fetch("/api/health", {
-      headers: {
-        "x-gemini-api-key": keyToUse
-      }
-    })
-      .then((r) => r.json())
-      .then((data) => setApiHealth(data))
-      .catch((err) => console.error("Error checking health:", err));
-  };
 
   // Load initial state
   useEffect(() => {
@@ -88,9 +71,6 @@ export default function App() {
     } catch (e) {
       console.error("Error loading local storage state:", e);
     }
-
-    // Perform API Health Check with the key
-    checkApiHealth();
   }, []);
 
   // Save Stats
@@ -237,13 +217,15 @@ export default function App() {
     triggerStudyActivity(); // Marks studying!
 
     try {
-      const response = await fetch("/api/tutor", {
+      const response = await fetch("/api/chat", {
         method: "POST",
         headers: { 
-          "Content-Type": "application/json",
-          "x-gemini-api-key": localStorage.getItem("security_plus_user_gemini_key") || ""
+          "Content-Type": "application/json"
         },
-        body: JSON.stringify({ messages: updatedMsgs })
+        body: JSON.stringify({
+          message: text,
+          history: session.messages
+        })
       });
 
       if (!response.ok) {
@@ -263,7 +245,7 @@ export default function App() {
       const modelMsg: ChatMessage = {
         id: `msg-ai-${Date.now()}`,
         role: "model",
-        content: data.text || "I was unable to retrieve a response from the model. Please check your API key config.",
+        content: data.text || "I was unable to retrieve a response from the model.",
         timestamp: new Date().toLocaleTimeString()
       };
 
@@ -284,7 +266,7 @@ export default function App() {
       const errMsg: ChatMessage = {
         id: `msg-err-${Date.now()}`,
         role: "model",
-        content: `⚠️ **Tutor Error:** ${err.message || "An error occurred. Check if the backend is configured with your Gemini key."}`,
+        content: `⚠️ **Tutor Error:** ${err.message || "An error occurred."}`,
         timestamp: new Date().toLocaleTimeString()
       };
       setChatSessions((prevSessions) => {
@@ -320,16 +302,24 @@ export default function App() {
     };
 
     const updatedMsgs = [...session.messages, directiveMsg];
+    const updatedSessions = [...chatSessions];
+    updatedSessions[sessionIndex] = {
+      ...session,
+      messages: updatedMsgs
+    };
+    saveChatSessions(updatedSessions);
     setIsAiLoading(true);
 
     try {
-      const response = await fetch("/api/tutor", {
+      const response = await fetch("/api/chat", {
         method: "POST",
         headers: { 
-          "Content-Type": "application/json",
-          "x-gemini-api-key": localStorage.getItem("security_plus_user_gemini_key") || ""
+          "Content-Type": "application/json"
         },
-        body: JSON.stringify({ messages: updatedMsgs })
+        body: JSON.stringify({
+          message: "Please continue your previous explanation or response right where you left off.",
+          history: session.messages
+        })
       });
 
       if (!response.ok) {
@@ -525,70 +515,15 @@ export default function App() {
           })}
         </nav>
 
-        {/* Footer info & API Key Setup */}
+        {/* Footer info & System Info */}
         <div className="mt-auto pt-4 border-t border-gray-200 px-2 space-y-3">
-          <div className="p-3 rounded-xl bg-slate-900 text-white shadow-md flex flex-col gap-2.5">
-            <div className="flex items-center justify-between">
-              <span className="text-xs font-bold tracking-wide flex items-center gap-1.5">
-                <Sparkles size={12} className="text-blue-400 animate-pulse" />
-                Gemini API Key
-              </span>
-              {apiHealth?.geminiKeyConfigured ? (
-                <span className="inline-flex items-center px-1.5 py-0.5 rounded-full text-[9px] font-bold bg-emerald-500/20 text-emerald-400">
-                  Active
-                </span>
-              ) : apiHealth && apiHealth.status === "error" ? (
-                <span className="inline-flex items-center px-1.5 py-0.5 rounded-full text-[9px] font-bold bg-rose-500/20 text-rose-400">
-                  Invalid
-                </span>
-              ) : (
-                <span className="inline-flex items-center px-1.5 py-0.5 rounded-full text-[9px] font-bold bg-slate-500/20 text-slate-400">
-                  Missing
-                </span>
-              )}
-            </div>
-
-            {apiHealth && apiHealth.status === "error" && apiHealth.reason && (
-              <div className="text-[10px] text-rose-300 bg-rose-500/10 p-2 rounded-lg border border-rose-500/20 leading-relaxed font-medium font-mono break-words">
-                ⚠️ {apiHealth.reason.replace("❌ ", "")}
-              </div>
-            )}
-
-            <div className="space-y-1.5">
-              <input
-                type="password"
-                placeholder="Paste Gemini API key..."
-                value={userGeminiKey}
-                onChange={(e) => setUserGeminiKey(e.target.value)}
-                className="w-full px-2.5 py-1.5 text-xs bg-slate-800 border border-slate-700 rounded-lg text-slate-100 placeholder-slate-500 focus:outline-hidden focus:border-blue-500 transition-colors font-mono"
-              />
-              <div className="flex gap-1.5">
-                <button
-                  onClick={() => {
-                    localStorage.setItem("security_plus_user_gemini_key", userGeminiKey);
-                    checkApiHealth(userGeminiKey);
-                  }}
-                  className="flex-1 py-1 px-2 rounded-md bg-blue-600 hover:bg-blue-500 active:bg-blue-700 text-[10px] font-bold tracking-wider uppercase transition-all text-center cursor-pointer text-white"
-                >
-                  Save & Test
-                </button>
-                {userGeminiKey && (
-                  <button
-                    onClick={() => {
-                      setUserGeminiKey("");
-                      localStorage.removeItem("security_plus_user_gemini_key");
-                      checkApiHealth("");
-                    }}
-                    className="py-1 px-2 rounded-md bg-slate-800 hover:bg-slate-700 text-slate-400 hover:text-white text-[10px] font-bold transition-all cursor-pointer border border-slate-700"
-                  >
-                    Clear
-                  </button>
-                )}
-              </div>
-            </div>
-
-            <p className="text-[9px] text-slate-400 leading-normal font-medium">
-              You can get a free API key from Google AI Studio. The key is saved safely in your browser's local storage.
+          <div className="p-3 rounded-xl bg-slate-50 border border-gray-200 flex flex-col gap-1">
+            <span className="text-xs font-bold text-slate-800 flex items-center gap-1.5">
+              <Sparkles size={12} className="text-blue-600" />
+              AI-Powered Hub
+            </span>
+            <p className="text-[10px] text-slate-500 leading-normal font-medium">
+              Study guides, customized tutor sessions, dynamic practice quizzes, and high-impact flashcards are automatically powered by server-side Gemini intelligence.
             </p>
           </div>
 

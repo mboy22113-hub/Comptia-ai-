@@ -38,8 +38,7 @@ export function FlashcardsView({
       const response = await fetch("/api/flashcards", {
         method: "POST",
         headers: { 
-          "Content-Type": "application/json",
-          "x-gemini-api-key": localStorage.getItem("security_plus_user_gemini_key") || ""
+          "Content-Type": "application/json"
         },
         body: JSON.stringify({
           topicTitle: `${activeTopic.id}: ${activeTopic.title}`,
@@ -48,7 +47,7 @@ export function FlashcardsView({
       });
 
       if (!response.ok) {
-        let errorMsg = "Failed to generate flashcards. Please verify your Gemini API key is configured correctly.";
+        let errorMsg = "Failed to generate flashcards. Please try again.";
         try {
           const errData = await response.json();
           if (errData && errData.error) {
